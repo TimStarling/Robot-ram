@@ -1,2 +1,2 @@
-# Robet-ram
-机械臂控制代码
+# DS402_Robot_Arm_control
+基于一个串口转Can通信芯片开发的对巨蟹六轴机械臂的控制（基于CanOpen的DS402协议）
