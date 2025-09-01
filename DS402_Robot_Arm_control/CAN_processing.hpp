@@ -52,9 +52,11 @@
 
 #include <vector>
 #include <array>
+#include <iostream>
 #include "CAN_frame.hpp"
 #include "PDO_config.hpp"
 #include "class_motor.hpp"
+#include "Data_processing.hpp"
 
 
 
@@ -103,6 +105,11 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
         handleNodeStatus(nodeId, data[0]);
     }
     else if ((id >= 0x0601) && (id <= 0x067F)) {
+        
+        
+        //从设计上，作为上位机不需要处理命令报文，上位机负责发出命令，为了保证功能的完整性，这里实现部分留空
+        
+        
         // SDO命令报文
         uint8_t nodeId = id - 0x0600;
         handleSdoCommand(nodeId, data, dlc);
@@ -113,6 +120,10 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
         handleSdoResponse(nodeId, data, dlc);
     }
     else {
+
+
+
+
         // PDO帧处理逻辑合并
         if ((id >= 0x0201 && id <= 0x027F) ||  // RPDO1
             (id >= 0x0301 && id <= 0x037F) ||  // RPDO2
@@ -161,7 +172,10 @@ void parseCanFrame(const CanFrame& frame, std::array<Motor, 6>& motors,
             //执行PDO的处理
             ProcessPDO(nodeId, pdoNum, isTx, data, dlc, motors, pdoTable);
 
-        }
+        }//PDO处理逻辑结束
+
+
+
 
 
         else {
@@ -248,20 +262,24 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
     Motor& targetMotor = motors[nodeId - 1];
     std::lock_guard<std::mutex> lock(targetMotor.mtx_);//上锁
 
-    // 2. 遍历PDO配置表
+    // 2. 遍历PDO配置表 
+    // 线性查找，PDO配置表规模很小，查找开销忽略不计，不如保持更高可读性
     for (const auto& entry : pdoTable) {
         // 匹配当前节点和PDO编号
         if (entry.motorIndex == nodeId && entry.pdoIndex == pdoNum && entry.isTx == isTxFrame) {
-            // 3. 检查数据边界
-            if (entry.size > 8 || entry.offsetInPdo + entry.size > dlc) {
-                continue; // 数据越界跳过
+            // 3. 增强边界检查
+            if (entry.size == 0 || entry.size > 8 || 
+                entry.offsetInPdo >= dlc || 
+                entry.offsetInPdo + entry.size > dlc ||
+                entry.motorFieldOffset > sizeof(Motor) - entry.size) {
+                continue; // 数据越界或无效，跳过
             }
 
-            // 4. 计算目标字段地址
-            uint8_t* motorField = reinterpret_cast<uint8_t*>(&targetMotor) + entry.motorFieldOffset;
-
-            // 5. 拷贝数据到电机字段
-            std::memcpy(motorField, &data[entry.offsetInPdo], entry.size);
+            // 4. 验证内存访问安全性
+            // 检查电机字段偏移是否在合理范围内
+            if (entry.motorFieldOffset + entry.size > sizeof(Motor)) {
+                continue; // 偏移量越界，跳过
+            }
 
             // 动态设置标志位（在锁保护下操作，可直接使用非原子写入）
             //首先分析是写入还是发送，再根据电机端匹配到的地址对应到上位机的电机类的变量，修改完毕后，改变刷新标志等待刷新
@@ -275,31 +293,47 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
                     break;
 
                 case OD_ACTUAL_CURRENT: // 0x6078 实际电流（接收）
-                    targetMotor.current.raw_actual.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.current.raw_actual.bytes_[1] = data[entry.offsetInPdo + 1];
-                    targetMotor.current.flags_.store(
-                        targetMotor.current.flags_.load(std::memory_order_relaxed) |
-                        MotorCurrent::RAW_DATA_RECEIVE_NEED_REFRESH,
-                        std::memory_order_relaxed);
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.current.raw_actual.setBytes(temp_bytes);
+                        targetMotor.current.flags_.store(
+                            targetMotor.current.flags_.load(std::memory_order_relaxed) |
+                            MotorCurrent::RAW_DATA_RECEIVE_NEED_REFRESH,
+                            std::memory_order_relaxed);
+                    }
                     break;
 
                 case OD_ACTUAL_POSITION: // 0x6064 实际位置（接收）
-                    for (int i = 0; i < 4; ++i) {
-                        targetMotor.position.raw_actual.bytes_[i] = data[entry.offsetInPdo + i];
+                    {
+                        uint8_t temp_bytes[4] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1],
+                            data[entry.offsetInPdo + 2],
+                            data[entry.offsetInPdo + 3]
+                        };
+                        targetMotor.position.raw_actual.setBytes(temp_bytes);
+                        targetMotor.position.flags_.store(
+                            targetMotor.position.flags_.load(std::memory_order_relaxed) |
+                            MotorPosition::RAW_DATA_RECEIVE_NEED_REFRESH,
+                            std::memory_order_relaxed);
                     }
-                    targetMotor.position.flags_.store(
-                        targetMotor.position.flags_.load(std::memory_order_relaxed) |
-                        MotorPosition::RAW_DATA_RECEIVE_NEED_REFRESH,
-                        std::memory_order_relaxed);
                     break;
 
                 case OD_ACTUAL_VELOCITY: // 0x606C 实际速度（接收）
-                    targetMotor.velocity.raw_actual.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.velocity.raw_actual.bytes_[1] = data[entry.offsetInPdo + 1];
-                    targetMotor.velocity.flags_.store(
-                        targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
-                        MotorVelocity::RAW_DATA_RECEIVE_NEED_REFRESH,
-                        std::memory_order_relaxed);
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.velocity.raw_actual.setBytes(temp_bytes);
+                        targetMotor.velocity.flags_.store(
+                            targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
+                            MotorVelocity::RAW_DATA_RECEIVE_NEED_REFRESH,
+                            std::memory_order_relaxed);
+                    }
                     break;
 
                 case OD_MODES_OF_DISPLAY: // 0x6061 运行模式（接收）
@@ -326,41 +360,62 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
                     break;
 
                 case OD_TARGET_CURRENT: // 0x6071 目标电流（发送）
-                    targetMotor.current.raw_target.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.current.raw_target.bytes_[1] = data[entry.offsetInPdo + 1];
-                    targetMotor.current.flags_.store(
-                        targetMotor.current.flags_.load(std::memory_order_relaxed) |
-                        MotorCurrent::RAW_DATA_SEND_NEED_REFRESH,
-                        std::memory_order_relaxed);
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.current.raw_target.setBytes(temp_bytes);
+                        targetMotor.current.flags_.store(
+                            targetMotor.current.flags_.load(std::memory_order_relaxed) |
+                            MotorCurrent::RAW_DATA_SEND_NEED_REFRESH,
+                            std::memory_order_relaxed);
+                    }
                     break;
 
                 case OD_TARGET_POSITION: // 0x607A 目标位置（发送）
-                    for (int i = 0; i < 4; ++i) {
-                        targetMotor.position.raw_target.bytes_[i] = data[entry.offsetInPdo + i];
+                    {
+                        uint8_t temp_bytes[4] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1],
+                            data[entry.offsetInPdo + 2],
+                            data[entry.offsetInPdo + 3]
+                        };
+                        targetMotor.position.raw_target.setBytes(temp_bytes);
+                        targetMotor.position.flags_.store(
+                            targetMotor.position.flags_.load(std::memory_order_relaxed) |
+                            MotorPosition::RAW_DATA_SEND_NEED_REFRESH,
+                            std::memory_order_relaxed);
                     }
-                    targetMotor.position.flags_.store(
-                        targetMotor.position.flags_.load(std::memory_order_relaxed) |
-                        MotorPosition::RAW_DATA_SEND_NEED_REFRESH,
-                        std::memory_order_relaxed);
                     break;
 
                 case OD_TARGET_VELOCITY_VELOCITY_MODE: // 0x60FF 目标速度（速度模式发送）
-                    targetMotor.velocity.raw_target_velocity_mode.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.velocity.raw_target_velocity_mode.bytes_[1] = data[entry.offsetInPdo + 1];
-                    targetMotor.velocity.flags_.store(
-                        targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
-                        MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE,
-                        std::memory_order_relaxed);
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.velocity.raw_target_velocity_mode.setBytes(temp_bytes);
+                        targetMotor.velocity.flags_.store(
+                            targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
+                            MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_VELOCITY_MODE,
+                            std::memory_order_relaxed);
+                    }
                     break;
 
 
                 case OD_TARGET_VELOCITY_POSITION_MODE: // 0x6081 目标速度（位置模式发送）
-                    targetMotor.velocity.raw_target_position_mode.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.velocity.raw_target_position_mode.bytes_[1] = data[entry.offsetInPdo + 1];
-                    targetMotor.velocity.flags_.store(
-                        targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
-                        MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE,
-                        std::memory_order_relaxed);
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.velocity.raw_target_position_mode.setBytes(temp_bytes);
+                        targetMotor.velocity.flags_.store(
+                            targetMotor.velocity.flags_.load(std::memory_order_relaxed) |
+                            MotorVelocity::RAW_DATA_SEND_NEED_REFRESH_POSITION_MODE,
+                            std::memory_order_relaxed);
+                    }
                     break;
 
                 case OD_MODES_OF_OPERATION: // 0x6060 运行模式（发送）
@@ -368,13 +423,23 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
                     break;
 
                 case OD_ACCELERATION: // 0x6083 加速度（发送）
-                    targetMotor.accelDecel.raw_accel.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.accelDecel.raw_accel.bytes_[1] = data[entry.offsetInPdo + 1];
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.accelDecel.raw_accel.setBytes(temp_bytes);
+                    }
                     break;
 
                 case OD_DECELERATION: // 0x6084 减速度（发送）
-                    targetMotor.accelDecel.raw_decel.bytes_[0] = data[entry.offsetInPdo];
-                    targetMotor.accelDecel.raw_decel.bytes_[1] = data[entry.offsetInPdo + 1];
+                    {
+                        uint8_t temp_bytes[2] = {
+                            data[entry.offsetInPdo],
+                            data[entry.offsetInPdo + 1]
+                        };
+                        targetMotor.accelDecel.raw_decel.setBytes(temp_bytes);
+                    }
                     break;
                 }
             }
@@ -382,7 +447,6 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
     }
 
     // 7. 立即刷新所有数据
-    //targetMotor.refreshMotorData(targetMotor.stateAndMode);
     targetMotor.refreshMotorData(targetMotor.current);
     targetMotor.refreshMotorData(targetMotor.position);
     targetMotor.refreshMotorData(targetMotor.velocity);
@@ -394,9 +458,42 @@ inline void ProcessPDO(uint8_t nodeId, //节点ID
 
 /**
  * @brief 处理未知帧类型
+ * @param id CAN帧ID
+ * @param data CAN帧数据区指针
+ * @param dlc 数据长度
+ * 
+ * @note 按照CLAUDE.md错误输出标准格式化错误信息并打印帧数据
  */
 inline void handleUnknownFrame(uint32_t id, const uint8_t* data, uint8_t dlc) {
-    // 实现留空
+    // 按照CLAUDE.md标准输出错误信息
+    std::cout << "[ERROR][CAN_processing::handleUnknownFrame]: 接收到未知CAN帧类型, ID=0x" 
+              << std::hex << std::uppercase << id << std::dec << ", DLC=" << static_cast<int>(dlc) << std::endl;
+    
+    // 构造完整CAN帧数据用于调试打印
+    std::vector<uint8_t> frameData;
+    frameData.reserve(13); // 1(帧信息) + 4(ID) + 8(最大数据长度)
+    
+    // 添加帧信息字节 (DLC + 标志位，这里简化为DLC)
+    frameData.push_back(dlc);
+    
+    // 添加帧ID (大端序4字节)
+    frameData.push_back(static_cast<uint8_t>((id >> 24) & 0xFF));
+    frameData.push_back(static_cast<uint8_t>((id >> 16) & 0xFF));
+    frameData.push_back(static_cast<uint8_t>((id >> 8) & 0xFF));
+    frameData.push_back(static_cast<uint8_t>(id & 0xFF));
+    
+    // 添加数据区
+    for (uint8_t i = 0; i < dlc && i < 8; ++i) {
+        frameData.push_back(data[i]);
+    }
+    
+    // 填充剩余字节到8字节
+    for (uint8_t i = dlc; i < 8; ++i) {
+        frameData.push_back(0x00);
+    }
+    
+    // 使用Data_processing.hpp中的打印函数
+    PrintCANbinaryData(frameData);
 }
 
 
