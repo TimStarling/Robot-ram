@@ -4,7 +4,6 @@
 #include <cmath>
 #include <mutex>
 #include <atomic>
-#include <boost/asio/serial_port.hpp>
 #include <boost/asio.hpp>
 #include <thread>
 #include <chrono>
@@ -13,15 +12,19 @@
 #include <locale>
 #include <codecvt>
 
-#include "CLASS_Motor.hpp"
-#include "Data_processing.hpp"
-#include "CAN_processing.hpp"
+// #include "CLASS_Motor.hpp"
+// #include "Data_processing.hpp"
+// #include "CAN_processing.hpp"
+// #include "CAN_Queue.hpp"
 
-#include "test/test_CLASS_Motor.hpp"
+// #include "test/test_CLASS_Motor.hpp"
 #include "test/test_PDO_config.hpp"
-#include "test/test_PDO_processing.hpp"
+// #include "test/test_PDO_processing.hpp"
 #include "test/test_SDO_State_Machine.hpp"
-
+#include "test/test_Serial_Module.hpp"
+#include "test/test_circular_buffer.hpp"
+#include "test/test_Send_Thread.hpp"
+#include "Serial_Module.hpp"
 
 
 
@@ -34,10 +37,12 @@ int main(){
 	 
          //电机类测试
         // 创建电机实例数组   
-    std::array<Motor, 6> motors = {
-        Motor(1), Motor(2), Motor(3),
-        Motor(4), Motor(5), Motor(6) };
+    // std::array<Motor, 6> motors = {
+    //     Motor(1), Motor(2), Motor(3),
+    //     Motor(4), Motor(5), Motor(6) };
     
+
+    //SerialPortManager serial;
 
     // 执行测试
     //testMotorClass(motors);
@@ -57,9 +62,26 @@ int main(){
     //testSDOStateMachineMultiThreadPerformance();
     //testSdoTimeoutRetryMechanism();
 
-    testSdoTimeoutRetryMechanism();
+    //testSdoTimeoutRetryMechanism();
+
+    //testSerialBasicSend("COM10");
+    //testSerialBatchSend("COM10");
+    //testSerialRealBatchSend("COM10");
+
+
+    testSDOStateMachineMultiThreadPerformance();
+    
+    // 测试发送线程PDO功能
+    testSendThreadPdoMapping();      // 简单的PDO映射测试
+    testSendThreadPdoFunction();     // 完整的PDO功能测试
+    
+    // 环形缓冲区理论性能测试
+    //testTheoreticalPerformance();
+    //testBatchTheoreticalPerformance();
 
 
 
 	return 0;
 }
+
+
